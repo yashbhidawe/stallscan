@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+*.manifest
+*.spec
+
+# Virtual environment
+venv/
+.env
+.venv/
+ENV/
+env/
+env.bak/
+
+# FastAPI / Uvicorn
+*.log
+
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build / Dist
+build/
+dist/
+*.egg-info/
+*.eggs/
+*.whl
+
+# OS files
+.DS_Store
+Thumbs.db
