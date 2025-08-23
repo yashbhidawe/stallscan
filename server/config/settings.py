@@ -8,12 +8,11 @@ load_dotenv()
 class Settings(BaseSettings):
     # API Keys
     google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
-    
     google_places_api_key: str = os.getenv("GOOGLE_PLACES_API_KEY", "")
     
     # App Configuration
-    app_name: str = "Floorplan Extractor"
-    app_version: str = "5.0.0"
+    app_name: str = "Floorplan Extractor with Places API"
+    app_version: str = "6.0.0"
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
     
     # CORS Configuration
@@ -40,6 +39,12 @@ class Settings(BaseSettings):
     # Processing Configuration
     overlap_pixels: int = 50
     poor_results_threshold: int = 10
+    
+    # Places API Configuration
+    enable_places_enrichment: bool = os.getenv("ENABLE_PLACES_ENRICHMENT", "true").lower() == "true"
+    places_api_timeout: int = 30
+    places_max_concurrent: int = 3
+    default_search_location: str = os.getenv("DEFAULT_SEARCH_LOCATION", "")
     
     class Config:
         env_file = ".env"

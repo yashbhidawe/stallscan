@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 import os
 import time
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from typing import Optional
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 # Local imports
 from config.settings import settings
-from models.schemas import ProcessingStrategy, APIResponse, ProcessingResult
+from models.schemas import ProcessingStrategy, EnrichedAPIResponse, EnrichedProcessingResult
 from services.pdf_processor import PDFProcessor
 from services.image_processor import ImageProcessor
 from services.gemini_service import GeminiService
+from services.enrichment_service import CompanyEnrichmentService
 from utils.validators import FileValidator
 from utils.merger import ResultMerger
 
@@ -34,6 +36,7 @@ app.add_middleware(
 pdf_processor = PDFProcessor()
 image_processor = ImageProcessor()
 gemini_service = GeminiService()
+enrichment_service = CompanyEnrichmentService()
 result_merger = ResultMerger()
 file_validator = FileValidator()
 
@@ -41,18 +44,27 @@ file_validator = FileValidator()
 async def extract_booths(
     file: UploadFile = File(...),
     strategy: ProcessingStrategy = ProcessingStrategy.ADAPTIVE,
-    high_res: bool = True
+    high_res: bool = True,
+    enrich: bool = Query(default=True, description="Enable Google Places enrichment"),
+    location: Optional[str] = Query(default=None, description="Search location for Places API (e.g., 'Las Vegas, NV')")
 ) -> JSONResponse:
     """
-    Extract booth information from PDF floor plan.
+    Extract and enrich booth information from PDF floor plan.
     
     - **file**: PDF file to process
     - **strategy**: Processing strategy (adaptive, grid, full)  
     - **high_res**: Use high resolution processing
+    - **enrich**: Enable Google Places API enrichment
+    - **location**: Location context for Places search
     """
     # Validate inputs
     file_validator.validate_pdf_file(file)
     file_validator.validate_processing_params(strategy.value, high_res)
+    
+    # Check if Places API is available for enrichment
+    if enrich and not settings.google_places_api_key:
+        print("⚠️ Places enrichment requested but API key not available")
+        enrich = False
     
     start_time = time.time()
     
@@ -114,27 +126,46 @@ async def extract_booths(
                     result = gemini_service.extract_from_tile(enhanced_tile)
                     all_results.append(result)
 
-        # Step 4: Merge all results
+        # Step 4: Merge extraction results
         merged = result_merger.merge_extraction_results(all_results)
-        processing_time = time.time() - start_time
+        extraction_time = time.time() - start_time
         
-        print(f"✅ Processing complete: {merged.total_booths} booths found in {processing_time:.2f}s")
+        print(f"✅ Extraction complete: {merged.total_booths} booths found in {extraction_time:.2f}s")
         
-        # Step 5: Format response
-        response_data = APIResponse(
-            message=f"Successfully processed {file.filename} using {strategy.value} strategy",
-            total_stalls_found=merged.total_booths,
+        # Step 5: Enrich with Google Places data
+        search_location = location or settings.default_search_location
+        enriched_booths, enrichment_time, api_calls = await enrichment_service.enrich_extraction_result(
+            merged, 
+            location=search_location,
+            enable_enrichment=enrich and settings.enable_places_enrichment
+        )
+        
+        total_processing_time = time.time() - start_time
+        
+        # Step 6: Get enrichment stats
+        stats = enrichment_service.get_enrichment_stats(enriched_booths)
+        
+        # Step 7: Format response
+        enrichment_msg = f" (enriched {stats['enriched_booths']}/{stats['total_booths']} companies)" if enrich else ""
+        
+        response_data = EnrichedAPIResponse(
+            message=f"Successfully processed {file.filename} using {strategy.value} strategy{enrichment_msg}",
+            total_stalls_found=len(enriched_booths),
             results=[
-                ProcessingResult(
+                EnrichedProcessingResult(
                     filename=file.filename,
-                    booths=merged.booths,
-                    total_booths=merged.total_booths,
+                    booths=enriched_booths,
+                    total_booths=len(enriched_booths),
                     extraction_method=f"gemini-{strategy.value}",
-                    processing_time=round(processing_time, 2)
+                    processing_time=round(extraction_time, 2),
+                    enrichment_time=round(enrichment_time, 2) if enrich else None,
+                    places_api_calls=api_calls if enrich else None
                 )
             ]
         )
 
+        print(f"🎉 Complete! Total time: {total_processing_time:.2f}s | Enrichment: {stats['enrichment_rate']}%")
+        
         return JSONResponse(content=response_data.dict())
         
     except Exception as e:
@@ -152,10 +183,12 @@ async def extract_booths(
 @app.get("/health")
 async def health():
     """Health check endpoint."""
+    places_available = bool(settings.google_places_api_key)
     return {
         "status": "ok",
         "app": settings.app_name,
-        "version": settings.app_version
+        "version": settings.app_version,
+        "places_api": "available" if places_available else "not configured"
     }
 
 @app.get("/")
@@ -163,6 +196,11 @@ async def root():
     """Root endpoint with API information."""
     return {
         "message": f"Welcome to {settings.app_name} v{settings.app_version}",
+        "features": [
+            "PDF floor plan extraction",
+            "Google Places API enrichment",
+            "Company details and contact info"
+        ],
         "docs": "/docs",
         "health": "/health"
     }

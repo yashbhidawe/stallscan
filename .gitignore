@@ -1,0 +1,11 @@
+# root-level venvs
+/venv/
+/.venv/
+
+# venvs anywhere in the tree (server/, etc.)
+**/venv/
+**/.venv/
+
+# Python junk
+**/__pycache__/
+**/*.py[cod]

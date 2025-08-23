@@ -13,9 +13,12 @@ Pillow==10.1.0
 google-generativeai==0.3.2
 
 # Future Google Places API
-# googlemaps==4.10.0  # Uncomment when implementing Places API
+googlemaps==4.10.0  # Uncomment when implementing Places API
 
-# Development dependencies (optional)
-# pytest==7.4.3
-# black==23.11.0
-# flake8==6.1.0
+Development dependencies (optional)
+black==23.11.0
+flake8==6.1.0
+
+beautifulsoup4==4.12.2
+lxml==4.9.3
+dnspython==2.4.2  # Optional: for email domain verificationblack==23.11.0

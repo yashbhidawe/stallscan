@@ -1,4 +1,3 @@
-import React from "react";
 import PDFUploader from "./components/PDFUpload";
 
 const App = () => {

@@ -18,11 +18,12 @@ interface UploadedFile {
 
 interface StallData {
   filename: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   booths: BoothData[];
   total_booths: number;
   extraction_method: string;
   processing_time: number;
+  enrichment_time?: number;
+  places_api_calls?: number;
 }
 
 const PDFUploader: React.FC = () => {
@@ -126,6 +127,7 @@ const PDFUploader: React.FC = () => {
       const formData = new FormData();
       formData.append("file", uploadedFiles[0].file); // use key "file"
 
+      // In your uploadFiles function:
       const response = await fetch("http://localhost:8000/extract", {
         method: "POST",
         body: formData,
@@ -135,28 +137,43 @@ const PDFUploader: React.FC = () => {
         throw new Error(`Upload failed: ${response.statusText}`);
       }
 
+      // In your uploadFiles function, after getting the API response:
       const result = await response.json();
       console.log("Upload successful:", result);
 
-      // Extract the results array from the API response
       if (result && result.results && Array.isArray(result.results)) {
-        setResults(result.results);
-        console.log("Setting results:", result.results);
+        // Transform the enriched data to extract only what you need
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const simplifiedResults = result.results.map((result: any) => ({
+          filename: result.filename,
+          total_booths: result.total_booths,
+          extraction_method: result.extraction_method,
+          processing_time: result.processing_time,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          booths: result.booths.map((booth: any) => ({
+            company_name: booth.company_name,
+            booth: booth.booth,
+            size: booth.size,
+            // Extract contact info from places_data
+            phone: booth.places_data?.phone || null,
+            website: booth.places_data?.website || null,
+            address: booth.places_data?.address || null,
+            email: null, // Email is not available from Google Places, you'll need to add this separately
+          })),
+        }));
+
+        setResults(simplifiedResults);
+        console.log("Setting simplified results:", simplifiedResults);
+
+        // Success message
+        const successMsg =
+          result.message ||
+          `Successfully processed ${uploadedFiles[0]?.file?.name || "file"}`;
+        setSuccess(successMsg);
       } else {
         console.error("Unexpected API response format:", result);
         setError("Unexpected response format from server");
       }
-
-      // Show success message with details from API response
-      const successMsg =
-        result.message ||
-        `Successfully processed ${uploadedFiles.length} file${
-          uploadedFiles.length !== 1 ? "s" : ""
-        }!`;
-      const stallInfo = result.total_stalls_found
-        ? ` Found ${result.total_stalls_found} stalls.`
-        : "";
-      setSuccess(successMsg + stallInfo);
 
       // Clear files after successful upload (with a small delay to show success)
       setTimeout(() => {

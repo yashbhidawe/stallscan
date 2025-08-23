@@ -37,16 +37,28 @@ class UploadRequest(BaseModel):
     strategy: ProcessingStrategy = ProcessingStrategy.ADAPTIVE
     high_res: bool = True
 
-# For future Google Places integration
+# Google Places integration
 class PlacesData(BaseModel):
     place_id: Optional[str] = None
+    name: Optional[str] = None
     website: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
-    rating: Optional[float] = None
-    reviews: Optional[int] = None
-    category: Optional[str] = None
-    business_status: Optional[str] = None
+   
 
 class EnrichedBoothData(BoothData):
     places_data: Optional[PlacesData] = None
+
+class EnrichedProcessingResult(BaseModel):
+    filename: str
+    booths: List[EnrichedBoothData]
+    total_booths: int
+    extraction_method: str
+    processing_time: float
+    enrichment_time: Optional[float] = None
+    places_api_calls: Optional[int] = None
+
+class EnrichedAPIResponse(BaseModel):
+    message: str
+    total_stalls_found: int
+    results: List[EnrichedProcessingResult]
