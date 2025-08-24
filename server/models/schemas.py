@@ -44,6 +44,7 @@ class PlacesData(BaseModel):
     website: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
+    email: Optional[str] = None
    
 
 class EnrichedBoothData(BoothData):
