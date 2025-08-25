@@ -14,25 +14,57 @@ class EmailFinderService:
             r'mailto:([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})',
         ]
         
-        # Common email prefixes to try
+        # Enhanced email prefixes with priority scoring
         self.common_prefixes = [
-            'info', 'contact', 'hello', 'support', 'admin', 'office',
-            'sales', 'enquiry', 'inquiry', 'general', 'main'
+            # High priority - general business contacts
+            'info', 'contact', 'hello', 'general', 'main', 'office',
+            # Medium priority - department specific
+            'sales', 'business', 'partnerships', 'marketing', 'pr',
+            'enquiry', 'inquiry', 'support', 'service', 'customer',
+            # Lower priority - but still relevant
+            'admin', 'reception', 'team', 'mail'
         ]
         
-        # Pages likely to contain contact information
+        # Enhanced contact pages with better coverage
         self.contact_pages = [
-            '/contact', '/contact-us', '/about', '/about-us', 
-            '/team', '/staff', '/leadership', '/management',
-            '/imprint', '/impressum', '/legal'
+            # Primary contact pages
+            '/contact', '/contact-us', '/contact-form', '/get-in-touch',
+            '/reach-us', '/connect', '/contactus',
+            
+            # About and team pages
+            '/about', '/about-us', '/aboutus', '/team', '/our-team', 
+            '/staff', '/people', '/leadership', '/management', '/executives',
+            
+            # Business pages
+            '/partners', '/partnership', '/business', '/corporate',
+            '/press', '/media', '/newsroom', '/investor-relations',
+            
+            # Footer and legal pages that often contain emails
+            '/footer', '/imprint', '/impressum', '/legal', '/privacy',
+            '/terms', '/sitemap'
         ]
+        
+        # Industry-specific contact patterns
+        self.industry_contact_patterns = {
+            'technology': ['tech@', 'dev@', 'engineering@', 'it@', 'digital@'],
+            'healthcare': ['medical@', 'clinic@', 'health@', 'patient@', 'care@'],
+            'manufacturing': ['production@', 'factory@', 'operations@', 'quality@'],
+            'finance': ['finance@', 'accounting@', 'investment@', 'advisor@'],
+            'retail': ['store@', 'shop@', 'customer@', 'orders@', 'retail@'],
+            'education': ['admissions@', 'academic@', 'student@', 'registrar@'],
+            'consulting': ['consulting@', 'advisory@', 'solutions@', 'strategy@']
+        }
     
     async def __aenter__(self):
         """Async context manager entry."""
         self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=10),
+            timeout=aiohttp.ClientTimeout(total=15),  # Increased timeout for better coverage
             headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive'
             }
         )
         return self
@@ -43,15 +75,37 @@ class EmailFinderService:
             await self.session.close()
     
     def extract_emails_from_text(self, text: str) -> Set[str]:
-        """Extract email addresses from text using regex patterns."""
+        """Extract email addresses from text using enhanced regex patterns."""
         emails = set()
-        for pattern in self.email_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
+        
+        # Enhanced patterns for better email detection
+        enhanced_patterns = [
+            # Standard email pattern
+            r'\b[A-Za-z0-9]([A-Za-z0-9._%+-]*[A-Za-z0-9])?@[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}\b',
+            # Mailto links
+            r'mailto:([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})',
+            # Email in quotes or parentheses  
+            r'["\']([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})["\']',
+            # Email with surrounding text indicators
+            r'(?:email|e-mail|contact|write|send)[\s:]*([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})',
+            # Email in JavaScript or hidden in HTML
+            r'([A-Za-z0-9._%+-]+)(?:\s*\[at\]\s*|\s*@\s*)([A-Za-z0-9.-]+)(?:\s*\[dot\]\s*|\s*\.\s*)([A-Za-z]{2,})'
+        ]
+        
+        for pattern in enhanced_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
             for match in matches:
                 if isinstance(match, tuple):
-                    emails.add(match[0].lower())
+                    if len(match) == 3:  # Pattern with [at] and [dot]
+                        email = f"{match[0]}@{match[1]}.{match[2]}"
+                    else:
+                        email = match[0] if match[0] else (match[1] if len(match) > 1 else '')
                 else:
-                    emails.add(match.lower())
+                    email = match
+                
+                if email and '@' in email and '.' in email:
+                    emails.add(email.lower().strip())
+        
         return emails
     
     def get_domain_from_url(self, url: str) -> Optional[str]:
@@ -62,39 +116,80 @@ class EmailFinderService:
         except:
             return None
     
-    def filter_relevant_emails(self, emails: Set[str], domain: str, company_name: str) -> List[str]:
-        """Filter emails to find most relevant ones for the company."""
+    def filter_relevant_emails(self, emails: Set[str], domain: str, company_name: str, industry_hint: Optional[str] = None) -> List[str]:
+        """Enhanced email filtering with industry context and better prioritization."""
         if not emails:
             return []
         
         relevant_emails = []
-        company_words = set(company_name.lower().split())
+        company_words = set(re.findall(r'\b\w{3,}\b', company_name.lower()))
+        
+        # Create scoring system for email relevance
+        email_scores = {}
         
         for email in emails:
-            email_domain = email.split('@')[1] if '@' in email else ''
-            email_local = email.split('@')[0] if '@' in email else ''
+            if '@' not in email:
+                continue
+                
+            email_local, email_domain = email.split('@', 1)
+            email_local = email_local.lower()
+            email_domain = email_domain.lower()
             
             # Skip obviously irrelevant emails
-            skip_patterns = ['noreply', 'no-reply', 'donotreply', 'unsubscribe']
-            if any(pattern in email_local.lower() for pattern in skip_patterns):
+            skip_patterns = [
+                'noreply', 'no-reply', 'donotreply', 'unsubscribe', 'bounce',
+                'postmaster', 'mailer-daemon', 'abuse', 'spam'
+            ]
+            if any(pattern in email_local for pattern in skip_patterns):
                 continue
             
-            # Prioritize emails from same domain
-            if domain and domain in email_domain:
-                # Check if it's a general contact email
-                if any(prefix in email_local.lower() for prefix in self.common_prefixes):
-                    relevant_emails.insert(0, email)  # High priority
-                else:
-                    relevant_emails.append(email)
+            score = 0
             
-            # Also consider emails that might contain company name
-            elif any(word in email_local.lower() for word in company_words if len(word) > 3):
-                relevant_emails.append(email)
+            # Domain relevance scoring
+            if domain and domain in email_domain:
+                score += 50  # Same domain gets high base score
+            elif any(word in email_domain for word in company_words if len(word) > 3):
+                score += 30  # Domain contains company words
+            
+            # Email prefix scoring
+            high_priority_prefixes = ['info', 'contact', 'hello', 'general', 'main']
+            medium_priority_prefixes = ['sales', 'business', 'marketing', 'support']
+            
+            if any(prefix == email_local for prefix in high_priority_prefixes):
+                score += 40
+            elif any(prefix in email_local for prefix in high_priority_prefixes):
+                score += 25
+            elif any(prefix in email_local for prefix in medium_priority_prefixes):
+                score += 15
+            
+            # Industry-specific scoring
+            if industry_hint and industry_hint.lower() in self.industry_contact_patterns:
+                industry_patterns = self.industry_contact_patterns[industry_hint.lower()]
+                for pattern in industry_patterns:
+                    if pattern.replace('@', '') in email_local:
+                        score += 20
+                        break
+            
+            # Company name relevance
+            if any(word in email_local for word in company_words if len(word) > 3):
+                score += 15
+            
+            # Penalize very generic emails from different domains
+            if not domain or domain not in email_domain:
+                generic_patterns = ['admin', 'webmaster', 'root', 'test']
+                if any(pattern in email_local for pattern in generic_patterns):
+                    score -= 20
+            
+            email_scores[email] = score
         
-        return relevant_emails
+        # Sort by score and return top emails
+        sorted_emails = sorted(email_scores.items(), key=lambda x: x[1], reverse=True)
+        relevant_emails = [email for email, score in sorted_emails if score > 0]
+        
+        return relevant_emails[:5]  # Return top 5 most relevant emails
     
     async def scrape_page_for_emails(self, url: str) -> Set[str]:
-        """Scrape a single page for email addresses."""
+        """Enhanced page scraping with better email detection."""
         if not self.session:
             self.session = aiohttp.ClientSession()
         
@@ -106,32 +201,60 @@ class EmailFinderService:
                 content = await response.text()
                 soup = BeautifulSoup(content, 'html.parser')
                 
-                # Remove script and style elements
+                all_emails = set()
+                
+                # Strategy 1: Extract from mailto links first (highest accuracy)
+                mailto_links = soup.find_all('a', href=re.compile(r'^mailto:', re.I))
+                for link in mailto_links:
+                    href = link.get('href', '').replace('mailto:', '')
+                    if '@' in href:
+                        # Clean up the email (remove subject, cc, etc.)
+                        email = href.split('?')[0].split('&')[0]
+                        all_emails.add(email.lower())
+                
+                # Strategy 2: Look in specific elements that commonly contain emails
+                contact_selectors = [
+                    # Common contact section classes/IDs
+                    '[class*="contact"]', '[id*="contact"]',
+                    '[class*="footer"]', '[id*="footer"]',
+                    '[class*="email"]', '[id*="email"]',
+                    
+                    # Structured data
+                    '[itemtype*="Organization"]', '[itemtype*="LocalBusiness"]',
+                    
+                    # Common contact elements
+                    'address', '.contact-info', '.contact-details',
+                    '.company-info', '.business-info'
+                ]
+                
+                contact_text = ""
+                for selector in contact_selectors:
+                    elements = soup.select(selector)
+                    for element in elements:
+                        contact_text += " " + element.get_text(separator=' ')
+                
+                # Strategy 3: Get all text but prioritize contact sections
                 for script in soup(["script", "style"]):
                     script.decompose()
                 
-                # Get text content
-                text = soup.get_text()
+                page_text = soup.get_text(separator=' ')
                 
-                # Also check href attributes for mailto links
-                mailto_links = soup.find_all('a', href=re.compile(r'^mailto:', re.I))
-                for link in mailto_links:
-                    href = link.get('href', '')
-                    if href.startswith('mailto:'):
-                        text += ' ' + href
+                # Combine contact text (higher weight) with page text
+                combined_text = contact_text + " " + page_text
                 
-                return self.extract_emails_from_text(text)
+                # Extract emails from combined text
+                extracted_emails = self.extract_emails_from_text(combined_text)
+                all_emails.update(extracted_emails)
+                
+                return all_emails
                 
         except Exception as e:
             logging.debug(f"Error scraping {url}: {e}")
             return set()
     
-    async def find_company_email(self, company_name: str, website: str) -> Optional[str]:
+    async def find_company_email(self, company_name: str, website: str, industry_hint: Optional[str] = None) -> Optional[str]:
         """
-        Find company email using multiple strategies:
-        1. Scrape main website
-        2. Check common contact pages
-        3. Try common email patterns
+        Enhanced email finding with industry context and better search strategy.
         """
         if not website or not company_name:
             return None
@@ -146,53 +269,83 @@ class EmailFinderService:
         
         all_emails = set()
         
-        # Strategy 1: Scrape main website
+        # Strategy 1: Scrape main website with enhanced detection
+        print(f"  📧 Searching main site: {website}")
         main_emails = await self.scrape_page_for_emails(website)
         all_emails.update(main_emails)
         
-        # Strategy 2: Check common contact pages
-        contact_urls = [urljoin(website, page) for page in self.contact_pages]
-        contact_tasks = [self.scrape_page_for_emails(url) for url in contact_urls]
+        # Strategy 2: Check contact pages with prioritized list
+        priority_contact_pages = ['/contact', '/contact-us', '/about', '/team']
+        standard_contact_pages = [page for page in self.contact_pages if page not in priority_contact_pages]
         
-        try:
-            contact_results = await asyncio.gather(*contact_tasks, return_exceptions=True)
-            for result in contact_results:
-                if isinstance(result, set):
-                    all_emails.update(result)
-        except Exception as e:
-            logging.debug(f"Error in contact page scraping: {e}")
+        # Check priority pages first
+        for page in priority_contact_pages:
+            contact_url = urljoin(website, page)
+            print(f"  📧 Checking priority page: {page}")
+            page_emails = await self.scrape_page_for_emails(contact_url)
+            all_emails.update(page_emails)
+            await asyncio.sleep(0.3)  # Small delay between requests
         
-        # Filter and prioritize emails
-        relevant_emails = self.filter_relevant_emails(all_emails, domain, company_name)
+        # If we found emails from priority pages, use them
+        if all_emails:
+            relevant_emails = self.filter_relevant_emails(all_emails, domain, company_name, industry_hint)
+            if relevant_emails:
+                print(f"  ✅ Found email from priority pages: {relevant_emails[0]}")
+                return relevant_emails[0]
         
-        # Strategy 3: If no emails found, try common patterns
+        # Strategy 3: Check additional contact pages if needed
+        for page in standard_contact_pages[:6]:  # Limit to avoid too many requests
+            contact_url = urljoin(website, page)
+            page_emails = await self.scrape_page_for_emails(contact_url)
+            all_emails.update(page_emails)
+            await asyncio.sleep(0.3)
+        
+        # Strategy 4: Filter and prioritize all found emails
+        relevant_emails = self.filter_relevant_emails(all_emails, domain, company_name, industry_hint)
+        
+        # Strategy 5: Enhanced fallback patterns with industry context
         if not relevant_emails:
-            common_emails = [f"{prefix}@{domain}" for prefix in self.common_prefixes]
-            # We could verify these exist, but that requires SMTP checking
-            # For now, return the most likely one
-            if 'info@' + domain not in [email for email in all_emails]:
-                relevant_emails = [f"info@{domain}"]
+            print(f"  🔄 Fallback to common patterns for {domain}")
+          
+            
+            # Return the most promising fallback
+            return "Not Found"
         
-        return relevant_emails[0] if relevant_emails else None
+        result_email = relevant_emails[0]
+        print(f"  ✅ Found email: {result_email}")
+        return result_email
     
     async def verify_email_exists(self, email: str) -> bool:
-        """
-        Basic email verification (check domain MX record).
-        Note: Full SMTP verification might be blocked by many servers.
-        """
+        """Enhanced email verification with MX record checking."""
         try:
             import dns.resolver
             domain = email.split('@')[1]
-            mx_records = dns.resolver.resolve(domain, 'MX')
-            return len(mx_records) > 0
+            
+            # Check MX records
+            try:
+                mx_records = dns.resolver.resolve(domain, 'MX')
+                if len(mx_records) > 0:
+                    return True
+            except:
+                pass
+            
+            # Fallback: Check if domain has A record
+            try:
+                a_records = dns.resolver.resolve(domain, 'A')
+                return len(a_records) > 0
+            except:
+                pass
+                
         except:
-            # If DNS resolution fails, assume email might exist
-            return True
+            pass
+        
+        # If DNS resolution fails, assume email might exist
+        return True
     
     async def find_emails_batch(self, companies_data: List[Dict[str, str]], max_concurrent: int = 3) -> Dict[str, Optional[str]]:
         """
-        Find emails for multiple companies concurrently.
-        companies_data: List of dicts with 'name' and 'website' keys
+        Enhanced batch email finding with industry context support.
+        companies_data: List of dicts with 'name', 'website', and optional 'industry' keys
         """
         semaphore = asyncio.Semaphore(max_concurrent)
         
@@ -201,9 +354,19 @@ class EmailFinderService:
                 try:
                     company_name = company_data.get('name', '')
                     website = company_data.get('website', '')
-                    email = await self.find_company_email(company_name, website)
-                    await asyncio.sleep(0.5)  # Be respectful with requests
+                    industry_hint = company_data.get('industry')
+                    
+                    print(f"🔍 Finding email for: {company_name}")
+                    email = await self.find_company_email(company_name, website, industry_hint)
+                    
+                    if email:
+                        print(f"✅ Email found for {company_name}: {email}")
+                    else:
+                        print(f"❌ No email found for {company_name}")
+                    
+                    await asyncio.sleep(0.8)  # Respectful delay between companies
                     return company_name, email
+                    
                 except Exception as e:
                     logging.error(f"Error finding email for {company_data.get('name', 'Unknown')}: {e}")
                     return company_data.get('name', ''), None

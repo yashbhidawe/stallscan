@@ -19,8 +19,7 @@ class Settings(BaseSettings):
     cors_origins: List[str] = [
         "http://localhost:5173",
         "http://localhost:3000",
-        "https://yourdomain.com"
-    ]
+"https://stallscan.vercel.app"    ]
     
     # File Upload Configuration
     max_file_size_mb: int = 10
