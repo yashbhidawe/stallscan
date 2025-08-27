@@ -46,7 +46,8 @@ async def extract_booths(
     strategy: ProcessingStrategy = ProcessingStrategy.ADAPTIVE,
     high_res: bool = True,
     enrich: bool = Query(default=True, description="Enable Google Places enrichment"),
-    location: Optional[str] = Query(default=None, description="Search location for Places API (e.g., 'Las Vegas, NV')")
+    location: Optional[str] = Query(default=None, description="Search location for Places API (e.g., 'Las Vegas, NV')"),
+    debug_tiles: bool = Query(default=False, description="Save tile images for debugging")
 ) -> JSONResponse:
     """
     Extract and enrich booth information from PDF floor plan.
@@ -78,59 +79,136 @@ async def extract_booths(
         
         all_results = []
         
-        # Step 3: Process each page
+        # Step 3: Process each page with improved strategy logic
         for page_num, page_img in enumerate(page_images):
             print(f"📄 Processing page {page_num + 1}, size: {page_img.size}")
+            
+            # Get processing strategy recommendations
+            processing_strategy = image_processor.get_processing_strategy(page_img)
+            print(f"📊 Strategy analysis: {processing_strategy}")
             
             if strategy == ProcessingStrategy.FULL:
                 # Process entire image
                 enhanced_image = image_processor.prepare_full_image(page_img)
                 result = gemini_service.extract_from_full_image(enhanced_image)
                 all_results.append(result)
+                print(f"✅ Full image: {result.total_booths} booths found")
                 
             elif strategy == ProcessingStrategy.ADAPTIVE:
-                # Adaptive processing with fallback
-                tiles = image_processor.adaptive_split_image(page_img)
+                # Enhanced adaptive processing with better fallback logic
+                page_results = []
                 
-                # Process all tiles
-                tile_results = []
-                for tile_data in tiles:
-                    enhanced_tile = {
-                        **tile_data,
-                        'image': image_processor.enhance_image_for_ocr(tile_data['image'])
-                    }
-                    result = gemini_service.extract_from_tile(enhanced_tile)
-                    tile_results.append(result)
-                
-                # Check if tiling was successful
-                total_found = sum(r.total_booths for r in tile_results)
-                if total_found < settings.poor_results_threshold:
-                    print(f"⚠️ Tiling found only {total_found} booths, trying full image...")
-                    enhanced_image = image_processor.prepare_full_image(page_img)
-                    fallback_result = gemini_service.extract_from_full_image(enhanced_image)
+                # Try tiling first if image is large enough
+                if processing_strategy['use_tiling']:
+                    print("🔄 Using tiling approach for large image")
+                    tiles = image_processor.adaptive_split_image(
+                        page_img, 
+                        save_tiles=True,  # ← Force it to True
+                        # save_tiles=debug_tiles,
+                        output_dir=f"debug_tiles/page_{page_num + 1}"
+                    )
                     
-                    if fallback_result.total_booths > total_found:
-                        all_results.append(fallback_result)
+                    # Process all tiles
+                    tile_results = []
+                    for tile_data in tiles:
+                        enhanced_tile_image = image_processor.enhance_image_for_ocr(tile_data['image'])
+                        enhanced_tile = {
+                            **tile_data,
+                            'image': enhanced_tile_image
+                        }
+                        
+                        # Save enhanced tile if debugging
+                        if debug_tiles:
+                            enhanced_filename = f"enhanced_tile_r{tile_data['grid_position'][0]}_c{tile_data['grid_position'][1]}.png"
+                            enhanced_path = tile_data.get('saved_path', '').replace('.png', '_enhanced.png')
+                            if enhanced_path:
+                                enhanced_tile_image.save(enhanced_path)
+                                print(f"  🎨 Enhanced: {enhanced_filename}")
+                        
+                        result = gemini_service.extract_from_tile(enhanced_tile)
+                        tile_results.append(result)
+                        print(f"  📦 Tile {tile_data['position']}: {result.total_booths} booths")
+                    
+                    # Merge tile results first
+                    merged_tile_result = result_merger.merge_extraction_results(tile_results)
+                    total_from_tiles = merged_tile_result.total_booths
+                    
+                    print(f"🔗 Merged tiles: {total_from_tiles} unique booths")
+                    
+                    # Improved fallback decision logic
+                    fallback_threshold = max(5, len(tiles) * 2)  # Dynamic threshold based on tile count
+                    
+                    if total_from_tiles < fallback_threshold:
+                        print(f"⚠️ Tile results below threshold ({total_from_tiles} < {fallback_threshold}), trying full image...")
+                        
+                        # Try full image approach
+                        enhanced_image = image_processor.prepare_full_image(page_img)
+                        fallback_result = gemini_service.extract_from_full_image(enhanced_image)
+                        
+                        print(f"🔄 Full image fallback: {fallback_result.total_booths} booths")
+                        
+                        # Use better result or combine both if they're complementary
+                        if fallback_result.total_booths > total_from_tiles * 1.5:
+                            print("✅ Using full image result (significantly better)")
+                            page_results.append(fallback_result)
+                        elif fallback_result.total_booths > total_from_tiles:
+                            print("🤝 Combining tile and full image results")
+                            # Combine both approaches for maximum coverage
+                            combined_results = [merged_tile_result, fallback_result]
+                            combined = result_merger.merge_extraction_results(combined_results)
+                            page_results.append(combined)
+                        else:
+                            print("✅ Keeping tile results (better than fallback)")
+                            page_results.append(merged_tile_result)
                     else:
-                        all_results.extend(tile_results)
+                        print("✅ Tile results look good, using them")
+                        page_results.append(merged_tile_result)
+                        
                 else:
-                    all_results.extend(tile_results)
+                    print("🖼️ Image size appropriate for full processing")
+                    # For smaller images, use full image processing directly
+                    enhanced_image = image_processor.prepare_full_image(page_img)
+                    result = gemini_service.extract_from_full_image(enhanced_image)
+                    page_results.append(result)
+                    print(f"✅ Full image: {result.total_booths} booths found")
+                
+                all_results.extend(page_results)
             
             else:  # GRID strategy
-                tiles = image_processor.adaptive_split_image(page_img)
+                print("📋 Using grid strategy")
+                tiles = image_processor.adaptive_split_image(
+                    page_img,
+                    save_tiles=debug_tiles,
+                    output_dir=f"debug_tiles/page_{page_num + 1}_grid"
+                )
                 for tile_data in tiles:
+                    enhanced_tile_image = image_processor.enhance_image_for_ocr(tile_data['image'])
                     enhanced_tile = {
                         **tile_data,
-                        'image': image_processor.enhance_image_for_ocr(tile_data['image'])
+                        'image': enhanced_tile_image
                     }
+                    
+                    # Save enhanced tile if debugging
+                    if debug_tiles:
+                        enhanced_path = tile_data.get('saved_path', '').replace('.png', '_enhanced.png')
+                        if enhanced_path:
+                            enhanced_tile_image.save(enhanced_path)
+                    
                     result = gemini_service.extract_from_tile(enhanced_tile)
                     all_results.append(result)
+                    print(f"  📦 Tile {tile_data['position']}: {result.total_booths} booths")
 
-        # Step 4: Merge extraction results
+        # Step 4: Merge extraction results with statistics
+        total_before_merge = sum(r.total_booths for r in all_results)
         merged = result_merger.merge_extraction_results(all_results)
         extraction_time = time.time() - start_time
         
-        print(f"✅ Extraction complete: {merged.total_booths} booths found in {extraction_time:.2f}s")
+        # Calculate merge stats manually if method doesn't exist
+        duplicates_removed = total_before_merge - merged.total_booths
+        duplicate_rate = duplicates_removed / total_before_merge if total_before_merge > 0 else 0
+        
+        print(f"✅ Extraction complete: {merged.total_booths} unique booths found in {extraction_time:.2f}s")
+        print(f"📊 Merge stats: {duplicates_removed} duplicates removed ({duplicate_rate:.1%} rate)")
         
         # Step 5: Enrich with Google Places data
         search_location = location or settings.default_search_location
@@ -145,7 +223,7 @@ async def extract_booths(
         # Step 6: Get enrichment stats
         stats = enrichment_service.get_enrichment_stats(enriched_booths)
         
-        # Step 7: Format response
+        # Step 7: Format response with enhanced metadata
         enrichment_msg = f" (enriched {stats['enriched_booths']}/{stats['total_booths']} companies)" if enrich else ""
         
         response_data = EnrichedAPIResponse(
