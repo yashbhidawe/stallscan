@@ -143,11 +143,13 @@ const PDFUploader: React.FC = () => {
     try {
       const formData = new FormData();
       formData.append("file", uploadedFiles[0].file);
-
-      const response = await fetch("http://localhost:8000/extract", {
-        method: "POST",
-        body: formData,
-      });
+      const response = await fetch(
+        `${import.meta.env.VITE_BACKEND_URL}/extract`,
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
 
       if (!response.ok) {
         throw new Error(`Upload failed: ${response.statusText}`);
