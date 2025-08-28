@@ -4,13 +4,19 @@ from enum import Enum
 
 class ProcessingStrategy(str, Enum):
     ADAPTIVE = "adaptive"
-    GRID = "grid" 
+    GRID = "grid"
     FULL = "full"
 
 class BoothData(BaseModel):
     company_name: str
     booth: str
     size: Optional[str] = ""
+    # New fields for OpenCV + OCR pipeline
+    booth_file: Optional[str] = None
+    detection_method: Optional[str] = None
+    page_number: Optional[int] = None
+    detection_index: Optional[int] = None
+    error_message: Optional[str] = None
 
 class TileData(BaseModel):
     position: str
@@ -45,7 +51,6 @@ class PlacesData(BaseModel):
     phone: Optional[str] = None
     address: Optional[str] = None
     email: Optional[str] = None
-   
 
 class EnrichedBoothData(BoothData):
     places_data: Optional[PlacesData] = None
@@ -58,6 +63,8 @@ class EnrichedProcessingResult(BaseModel):
     processing_time: float
     enrichment_time: Optional[float] = None
     places_api_calls: Optional[int] = None
+    pages_processed: Optional[int] = None
+    opencv_detections: Optional[int] = None
 
 class EnrichedAPIResponse(BaseModel):
     message: str

@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 # Local imports
 from config.settings import settings
-from models.schemas import ProcessingStrategy, EnrichedAPIResponse, EnrichedProcessingResult
+from models.schemas import ProcessingStrategy, EnrichedAPIResponse, EnrichedProcessingResult, BoothData, ExtractionResult
 from services.pdf_processor import PDFProcessor
 from services.image_processor import ImageProcessor
 from services.gemini_service import GeminiService
@@ -43,20 +43,22 @@ file_validator = FileValidator()
 @app.post("/extract")
 async def extract_booths(
     file: UploadFile = File(...),
-    strategy: ProcessingStrategy = ProcessingStrategy.ADAPTIVE,
+    strategy: ProcessingStrategy = ProcessingStrategy.ADAPTIVE,  # Now unused but kept for compatibility
     high_res: bool = True,
     enrich: bool = Query(default=True, description="Enable Google Places enrichment"),
     location: Optional[str] = Query(default=None, description="Search location for Places API (e.g., 'Las Vegas, NV')"),
-    debug_tiles: bool = Query(default=False, description="Save tile images for debugging")
+    debug_tiles: bool = Query(default=False, description="Save tile images for debugging"),
+    save_booth_images: bool = Query(default=True, description="Save individual booth detection images")
 ) -> JSONResponse:
     """
-    Extract and enrich booth information from PDF floor plan.
+    Extract and enrich booth information from PDF floor plan using OpenCV + Gemini OCR.
     
     - **file**: PDF file to process
-    - **strategy**: Processing strategy (adaptive, grid, full)  
     - **high_res**: Use high resolution processing
     - **enrich**: Enable Google Places API enrichment
     - **location**: Location context for Places search
+    - **save_booth_images**: Save detected booth images for inspection
+    - **strategy**: Kept for compatibility (OpenCV detection is always used)
     """
     # Validate inputs
     file_validator.validate_pdf_file(file)
@@ -77,177 +79,173 @@ async def extract_booths(
         # Step 2: Convert PDF to images
         page_images = pdf_processor.pdf_to_images(pdf_path, dpi)
         
-        all_results = []
+        all_booth_data = []
+        total_pages = len(page_images)
         
-        # Step 3: Process each page with improved strategy logic
+        # Step 3: Process each page with OpenCV detection only
         for page_num, page_img in enumerate(page_images):
-            print(f"📄 Processing page {page_num + 1}, size: {page_img.size}")
+            print(f"📄 Processing page {page_num + 1}/{total_pages}, size: {page_img.size}")
             
-            # Get processing strategy recommendations
-            processing_strategy = image_processor.get_processing_strategy(page_img)
-            print(f"📊 Strategy analysis: {processing_strategy}")
+            # Create output directory for this page
+            page_output_dir = f"opencv_output/page_{page_num + 1}"
             
-            if strategy == ProcessingStrategy.FULL:
-                # Process entire image
-                enhanced_image = image_processor.prepare_full_image(page_img)
-                result = gemini_service.extract_from_full_image(enhanced_image)
-                all_results.append(result)
-                print(f"✅ Full image: {result.total_booths} booths found")
+            # Step 3a: OpenCV booth detection
+            print("🎯 Using OpenCV booth detection")
+            saved_booth_files = image_processor.detect_booths(
+                page_img, 
+                output_dir=page_output_dir,
+                save_individual_detections=save_booth_images
+            )
+            
+            print(f"✅ OpenCV Detection: Found {len(saved_booth_files)} booth regions on page {page_num + 1}")
+            
+            if saved_booth_files:
+                # Step 3b: OCR each detected booth with Gemini
+                print(f"🤖 Running Gemini OCR on {len(saved_booth_files)} detected booths...")
                 
-            elif strategy == ProcessingStrategy.ADAPTIVE:
-                # Enhanced adaptive processing with better fallback logic
-                page_results = []
-                
-                # Try tiling first if image is large enough
-                if processing_strategy['use_tiling']:
-                    print("🔄 Using tiling approach for large image")
-                    tiles = image_processor.adaptive_split_image(
-                        page_img, 
-                        save_tiles=True,  # ← Force it to True
-                        # save_tiles=debug_tiles,
-                        output_dir=f"debug_tiles/page_{page_num + 1}"
-                    )
-                    
-                    # Process all tiles
-                    tile_results = []
-                    for tile_data in tiles:
-                        enhanced_tile_image = image_processor.enhance_image_for_ocr(tile_data['image'])
-                        enhanced_tile = {
-                            **tile_data,
-                            'image': enhanced_tile_image
+                for i, booth_file in enumerate(saved_booth_files):
+                    try:
+                        # Load the detected booth image
+                        from PIL import Image
+                        booth_image = Image.open(booth_file)
+                        
+                        # Enhance the booth image for better OCR
+                        enhanced_booth = image_processor.enhance_image_for_ocr(booth_image)
+                        
+                        # Create a tile structure for Gemini OCR
+                        booth_tile = {
+                            'image': enhanced_booth,
+                            'position': f'page_{page_num + 1}_booth_{i+1}',
+                            'grid_position': (page_num, i),
+                            'coordinates': (0, 0, booth_image.size[0], booth_image.size[1]),
+                            'source_file': booth_file
                         }
                         
-                        # Save enhanced tile if debugging
-                        if debug_tiles:
-                            enhanced_filename = f"enhanced_tile_r{tile_data['grid_position'][0]}_c{tile_data['grid_position'][1]}.png"
-                            enhanced_path = tile_data.get('saved_path', '').replace('.png', '_enhanced.png')
-                            if enhanced_path:
-                                enhanced_tile_image.save(enhanced_path)
-                                print(f"  🎨 Enhanced: {enhanced_filename}")
+                        # Run Gemini OCR on this booth
+                        ocr_result = gemini_service.extract_from_tile(booth_tile)
                         
-                        result = gemini_service.extract_from_tile(enhanced_tile)
-                        tile_results.append(result)
-                        print(f"  📦 Tile {tile_data['position']}: {result.total_booths} booths")
-                    
-                    # Merge tile results first
-                    merged_tile_result = result_merger.merge_extraction_results(tile_results)
-                    total_from_tiles = merged_tile_result.total_booths
-                    
-                    print(f"🔗 Merged tiles: {total_from_tiles} unique booths")
-                    
-                    # Improved fallback decision logic
-                    fallback_threshold = max(5, len(tiles) * 2)  # Dynamic threshold based on tile count
-                    
-                    if total_from_tiles < fallback_threshold:
-                        print(f"⚠️ Tile results below threshold ({total_from_tiles} < {fallback_threshold}), trying full image...")
-                        
-                        # Try full image approach
-                        enhanced_image = image_processor.prepare_full_image(page_img)
-                        fallback_result = gemini_service.extract_from_full_image(enhanced_image)
-                        
-                        print(f"🔄 Full image fallback: {fallback_result.total_booths} booths")
-                        
-                        # Use better result or combine both if they're complementary
-                        if fallback_result.total_booths > total_from_tiles * 1.5:
-                            print("✅ Using full image result (significantly better)")
-                            page_results.append(fallback_result)
-                        elif fallback_result.total_booths > total_from_tiles:
-                            print("🤝 Combining tile and full image results")
-                            # Combine both approaches for maximum coverage
-                            combined_results = [merged_tile_result, fallback_result]
-                            combined = result_merger.merge_extraction_results(combined_results)
-                            page_results.append(combined)
+                        # Process OCR results
+                        if hasattr(ocr_result, 'booths') and ocr_result.booths:
+                            for booth_data in ocr_result.booths:
+                                # Create new BoothData with all fields (Pydantic models are immutable)
+                                enhanced_booth = BoothData(
+                                    company_name=booth_data.company_name,
+                                    booth=booth_data.booth,
+                                    size=booth_data.size,
+                                    booth_file=booth_file,
+                                    detection_method="opencv+gemini_ocr",
+                                    page_number=page_num + 1,
+                                    detection_index=i + 1
+                                )
+                                all_booth_data.append(enhanced_booth)
+                                
+                            print(f"  🔍 Booth {i+1}: {len(ocr_result.booths)} companies found")
                         else:
-                            print("✅ Keeping tile results (better than fallback)")
-                            page_results.append(merged_tile_result)
-                    else:
-                        print("✅ Tile results look good, using them")
-                        page_results.append(merged_tile_result)
+                            # Create fallback booth data for failed OCR
+                            fallback_booth = BoothData(
+                                company_name=f"OCR_Failed_Page{page_num+1}_Booth{i+1}",
+                                booth=f"P{page_num+1}B{i+1:03d}",
+                                size="Unknown",
+                                booth_file=booth_file,
+                                detection_method="opencv_ocr_failed",
+                                page_number=page_num + 1,
+                                detection_index=i + 1
+                            )
+                            all_booth_data.append(fallback_booth)
+                            print(f"  ⚠️ Booth {i+1}: OCR returned no results, using fallback")
                         
-                else:
-                    print("🖼️ Image size appropriate for full processing")
-                    # For smaller images, use full image processing directly
-                    enhanced_image = image_processor.prepare_full_image(page_img)
-                    result = gemini_service.extract_from_full_image(enhanced_image)
-                    page_results.append(result)
-                    print(f"✅ Full image: {result.total_booths} booths found")
+                    except Exception as ocr_error:
+                        print(f"  ❌ OCR failed for booth {i+1}: {ocr_error}")
+                        # Create error fallback booth data
+                        error_booth = BoothData(
+                            company_name=f"OCR_Error_Page{page_num+1}_Booth{i+1}",
+                            booth=f"ERR_P{page_num+1}B{i+1:03d}",
+                            size="Unknown",
+                            booth_file=booth_file,
+                            detection_method="opencv_ocr_error",
+                            page_number=page_num + 1,
+                            detection_index=i + 1,
+                            error_message=str(ocr_error)
+                        )
+                        all_booth_data.append(error_booth)
                 
-                all_results.extend(page_results)
-            
-            else:  # GRID strategy
-                print("📋 Using grid strategy")
-                tiles = image_processor.adaptive_split_image(
-                    page_img,
-                    save_tiles=debug_tiles,
-                    output_dir=f"debug_tiles/page_{page_num + 1}_grid"
-                )
-                for tile_data in tiles:
-                    enhanced_tile_image = image_processor.enhance_image_for_ocr(tile_data['image'])
-                    enhanced_tile = {
-                        **tile_data,
-                        'image': enhanced_tile_image
-                    }
-                    
-                    # Save enhanced tile if debugging
-                    if debug_tiles:
-                        enhanced_path = tile_data.get('saved_path', '').replace('.png', '_enhanced.png')
-                        if enhanced_path:
-                            enhanced_tile_image.save(enhanced_path)
-                    
-                    result = gemini_service.extract_from_tile(enhanced_tile)
-                    all_results.append(result)
-                    print(f"  📦 Tile {tile_data['position']}: {result.total_booths} booths")
-
-        # Step 4: Merge extraction results with statistics
-        total_before_merge = sum(r.total_booths for r in all_results)
-        merged = result_merger.merge_extraction_results(all_results)
+                if save_booth_images:
+                    print(f"📁 Booth images saved to: {page_output_dir}/individual_detections")
+                
+            else:
+                print(f"⚠️ No booths detected on page {page_num + 1} with OpenCV")
+        
+        # Step 4: Create final extraction result
+        total_booths = len(all_booth_data)
+        
+        final_result = ExtractionResult(
+            total_booths=total_booths,
+            booths=all_booth_data
+        )
+        
         extraction_time = time.time() - start_time
-        
-        # Calculate merge stats manually if method doesn't exist
-        duplicates_removed = total_before_merge - merged.total_booths
-        duplicate_rate = duplicates_removed / total_before_merge if total_before_merge > 0 else 0
-        
-        print(f"✅ Extraction complete: {merged.total_booths} unique booths found in {extraction_time:.2f}s")
-        print(f"📊 Merge stats: {duplicates_removed} duplicates removed ({duplicate_rate:.1%} rate)")
+        print(f"🔍 OpenCV + Gemini OCR complete: {total_booths} total booth entries found across {total_pages} pages")
         
         # Step 5: Enrich with Google Places data
-        search_location = location or settings.default_search_location
-        enriched_booths, enrichment_time, api_calls = await enrichment_service.enrich_extraction_result(
-            merged, 
-            location=search_location,
-            enable_enrichment=enrich and settings.enable_places_enrichment
-        )
+        if enrich and final_result.booths:
+            search_location = location or settings.default_search_location
+            enriched_booths, enrichment_time, api_calls = await enrichment_service.enrich_extraction_result(
+                final_result, 
+                location=search_location,
+                enable_enrichment=enrich and settings.enable_places_enrichment
+            )
+            stats = enrichment_service.get_enrichment_stats(enriched_booths)
+            print(f"🌟 Places enrichment: {stats['enriched_booths']}/{stats['total_booths']} companies enriched ({api_calls} API calls)")
+        else:
+            enriched_booths = final_result.booths
+            enrichment_time = 0
+            api_calls = 0
+            stats = {'enriched_booths': 0, 'total_booths': total_booths, 'enrichment_rate': 0}
+            if not final_result.booths:
+                print("ℹ️ No booths to enrich")
+            elif not enrich:
+                print("ℹ️ Enrichment disabled by user")
         
         total_processing_time = time.time() - start_time
         
-        # Step 6: Get enrichment stats
-        stats = enrichment_service.get_enrichment_stats(enriched_booths)
-        
-        # Step 7: Format response with enhanced metadata
+        # Step 6: Format response
+        method_used = "opencv_detection + gemini_ocr"
         enrichment_msg = f" (enriched {stats['enriched_booths']}/{stats['total_booths']} companies)" if enrich else ""
         
         response_data = EnrichedAPIResponse(
-            message=f"Successfully processed {file.filename} using {strategy.value} strategy{enrichment_msg}",
+            message=f"Successfully processed {file.filename} using {method_used}{enrichment_msg}",
             total_stalls_found=len(enriched_booths),
             results=[
                 EnrichedProcessingResult(
                     filename=file.filename,
                     booths=enriched_booths,
                     total_booths=len(enriched_booths),
-                    extraction_method=f"gemini-{strategy.value}",
+                    extraction_method=method_used,
                     processing_time=round(extraction_time, 2),
                     enrichment_time=round(enrichment_time, 2) if enrich else None,
-                    places_api_calls=api_calls if enrich else None
+                    places_api_calls=api_calls if enrich else None,
+                    pages_processed=total_pages,
+                    opencv_detections=sum(1 for b in enriched_booths if hasattr(b, 'detection_method') and b.detection_method and 'opencv' in b.detection_method)
                 )
             ]
         )
-
-        print(f"🎉 Complete! Total time: {total_processing_time:.2f}s | Enrichment: {stats['enrichment_rate']}%")
+      
+        print(f"🎉 Complete! Total time: {total_processing_time:.2f}s | Method: {method_used}")
+        
+        # Print summary statistics
+        detection_methods = {}
+        for booth in enriched_booths:
+            method = getattr(booth, 'detection_method', 'unknown') or 'unknown'
+            detection_methods[method] = detection_methods.get(method, 0) + 1
+        
+        print(f"📊 Detection method breakdown: {detection_methods}")
         
         return JSONResponse(content=response_data.dict())
         
     except Exception as e:
         print(f"❌ Processing error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
         
     finally:
@@ -255,8 +253,9 @@ async def extract_booths(
         if 'pdf_path' in locals():
             try:
                 os.remove(pdf_path)
-            except OSError:
-                pass
+                print(f"🧹 Cleaned up temporary file: {pdf_path}")
+            except OSError as e:
+                print(f"⚠️ Could not remove temporary file: {e}")
 
 @app.get("/health")
 async def health():
@@ -266,7 +265,9 @@ async def health():
         "status": "ok",
         "app": settings.app_name,
         "version": settings.app_version,
-        "places_api": "available" if places_available else "not configured"
+        "detection_method": "opencv + gemini_ocr",
+        "places_api": "available" if places_available else "not configured",
+        "opencv_detection": "available"
     }
 
 @app.get("/")
@@ -276,8 +277,15 @@ async def root():
         "message": f"Welcome to {settings.app_name} v{settings.app_version}",
         "features": [
             "PDF floor plan extraction",
+            "OpenCV booth detection (PRIMARY)",
+            "Gemini OCR for detected booths",
             "Google Places API enrichment",
             "Company details and contact info"
+        ],
+        "detection_pipeline": [
+            "1. OpenCV detects booth regions",
+            "2. Gemini OCR extracts text from detected booths", 
+            "3. Google Places API enriches company data"
         ],
         "docs": "/docs",
         "health": "/health"
